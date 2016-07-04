@@ -36,6 +36,8 @@
  * \author  Adam Dunkels <adam@sics.se>\author
  * \author  Mathilde Durvy <mdurvy@cisco.com> (IPv6 related code)
  * \author  Julien Abeille <jabeille@cisco.com> (IPv6 related code)
+ *Edited By
+ * \author  Mohamed Seliem<mseliem11@gmail.com> (Rfc6775 related code)
  */
 
 #include "contiki-net.h"
@@ -464,18 +466,23 @@ eventhandler(process_event_t ev, process_data_t data)
           uip_ds6_periodic();
           tcpip_ipv6_output();
         }*/
+     //Begin RFC6775 Modifications
+        if(data == &uip_ds6_timer_ns &&
+            etimer_expired(&uip_ds6_timer_ns)) {
+           uip_ds6_send_ns_registered(NULL);
+           }
 #if !UIP_CONF_ROUTER
     if(data == &uip_ds6_timer_rs &&
-        etimer_expired(&uip_ds6_timer_rs)) {
-      uip_ds6_send_rs();
-      tcpip_ipv6_output();
-    }
+           etimer_expired(&uip_ds6_timer_rs)){
+          uip_ds6_send_rs(NULL);
+          tcpip_ipv6_output();
+        }
 #endif /* !UIP_CONF_ROUTER */
-    if(data == &uip_ds6_timer_periodic &&
-        etimer_expired(&uip_ds6_timer_periodic)) {
-      uip_ds6_periodic();
-      tcpip_ipv6_output();
-    }
+     if(data == &uip_ds6_timer_periodic &&
+           etimer_expired(&uip_ds6_timer_periodic)){
+          uip_ds6_periodic();
+          tcpip_ipv6_output();
+        }
 #endif /* NETSTACK_CONF_WITH_IPV6 */
   }
   break;
@@ -679,9 +686,9 @@ tcpip_ipv6_output(void)
          * solicitation.  Otherwise, any one of the addresses assigned to the
          * interface should be used."*/
         if(uip_ds6_is_my_addr(&UIP_IP_BUF->srcipaddr)){
-          uip_nd6_ns_output(&UIP_IP_BUF->srcipaddr, NULL, &nbr->ipaddr);
+          uip_nd6_ns_output(&UIP_IP_BUF->srcipaddr, NULL, &nbr->ipaddr,0,0);
         } else {
-          uip_nd6_ns_output(NULL, NULL, &nbr->ipaddr);
+          uip_nd6_ns_output(NULL, NULL, &nbr->ipaddr,0,0);
         }
 
         stimer_set(&nbr->sendns, uip_ds6_if.retrans_timer / 1000);

@@ -51,6 +51,7 @@
 #include "net/linkaddr.h"
 #include "net/packetbuf.h"
 #include "net/ipv6/uip-ds6-nbr.h"
+#include "net/ipv6/uip-ds6.h"
 
 #define DEBUG DEBUG_NONE
 #include "net/ip/uip-debug.h"
@@ -68,8 +69,19 @@ void LINK_NEIGHBOR_CALLBACK(const linkaddr_t *addr, int status, int numtx);
 #else
 #define LINK_NEIGHBOR_CALLBACK(addr, status, numtx)
 #endif /* UIP_CONF_DS6_LINK_NEIGHBOR_CALLBACK */
+uip_ds6_reg_t uip_ds6_reg_list[UIP_DS6_REG_LIST_SIZE]; /** \brief Registrations list */
+uip_ds6_defrt_t uip_ds6_defrt_list[UIP_DS6_DEFRT_NB];             /** \brief Default rt list */
 
 NBR_TABLE_GLOBAL(uip_ds6_nbr_t, ds6_neighbors);
+
+/* Pointers used in this file */
+static uip_ds6_defrt_t *locdefrt;
+#if UIP_ND6_SEND_NA
+static uip_ds6_reg_t *locreg;
+static uip_ds6_defrt_t *min_defrt; /* default router with minimum lifetime */
+static unsigned long min_lifetime; /* minimum lifetime */
+static uip_ds6_nbr_t *locnbr;
+#endif
 
 /*---------------------------------------------------------------------------*/
 void
@@ -247,6 +259,77 @@ uip_ds6_link_neighbor_callback(int status, int numtx)
 void
 uip_ds6_neighbor_periodic(void)
 {
+  /* This flag signals whether we allow or not to send a packet in the current
+   * invocation. */
+  uint8_t allow_output = 1;
+
+  /* minimum lifetime */
+  min_lifetime = 0xFFFFFFFF;
+  /* router with minimum lifetime */
+  min_defrt = NULL;
+
+  /* Periodic processing on registrations */
+  for(locreg = uip_ds6_reg_list;
+      locreg < uip_ds6_reg_list + UIP_DS6_REG_LIST_SIZE; locreg++) {
+    if(locreg->isused) {
+      if(stimer_expired(&locreg->reg_lifetime)) {
+        uip_ds6_reg_rm(locreg);
+      } else if(allow_output) {
+        /* If no output is allowed, it is pointless to enter here in this invocation */
+        if(uip_ds6_if.registration_in_progress) {
+          /* There is a registration in progress */
+          if((locreg == uip_ds6_if.registration_in_progress) &&
+             (timer_expired(&locreg->registration_timer))) {
+            /* We already sent a NS message for this address but there has been no response */
+            if(locreg->reg_count >= UIP_ND6_MAX_UNICAST_SOLICIT) {
+              /* NUD failed. Signal the need for next-hop determination by deleting the
+               * NCE (RFC 4861) */
+              uip_ds6_reg_rm(locreg);
+              /* And then, delete neighbor and corresponding router (as hosts only keep
+               * NCEs for routers in 6lowpan-nd) */
+              locnbr = uip_ds6_nbr_lookup(&locreg->defrt->ipaddr);
+              uip_ds6_nbr_rm(locnbr);
+              uip_ds6_defrt_rm(locreg->defrt);
+              /* Since we are deleting a default router, we must delete also all
+               * registrations with that router.
+               * Be careful here, uip_ds6_reg_cleanup_defrt() modifies the value of locreg!*/
+              uip_ds6_reg_cleanup_defrt(locreg->defrt);
+              /* We will also need to start sending RS,
+               * for NUD failure case */
+#if !UIP_CONF_ROUTER
+              uip_ds6_send_rs(NULL);
+#endif
+              uip_ds6_if.registration_in_progress = NULL;
+            } else {
+              locreg->reg_count++;
+              timer_restart(&locreg->registration_timer);
+              uip_nd6_ns_output(&locreg->addr->ipaddr, &locreg->defrt->ipaddr,
+                                &locreg->defrt->ipaddr, 1, UIP_ND6_REGISTRATION_LIFETIME);
+            }
+            allow_output = 0;                               /* Prevent this invocation from sending anything else */
+          }
+        } else
+        /* There are no registrations in progress, let's see this entry needs (re)registration
+         * or deletion */
+        if((locreg->state == REG_GARBAGE_COLLECTIBLE) ||
+           (locreg->state == REG_TO_BE_UNREGISTERED) ||
+           ((locreg->state == REG_REGISTERED) &&
+            (stimer_remaining(&locreg->reg_lifetime) < stimer_elapsed(&locreg->reg_lifetime)))) {
+          /* Issue (re)registration */
+          uip_ds6_if.registration_in_progress = locreg;
+          locreg->reg_count++;
+          timer_set(&locreg->registration_timer, (uip_ds6_if.retrans_timer / 1000) * CLOCK_SECOND);
+          if(locreg->state == REG_TO_BE_UNREGISTERED) {
+            uip_nd6_ns_output(&locreg->addr->ipaddr, &locreg->defrt->ipaddr,
+                              &locreg->defrt->ipaddr, 1, 0);
+          } else {
+            uip_nd6_ns_output(&locreg->addr->ipaddr, &locreg->defrt->ipaddr,
+                              &locreg->defrt->ipaddr, 1, UIP_ND6_REGISTRATION_LIFETIME);
+          } allow_output = 0;                     /* Prevent this invocation from sending anything else */
+        }
+      }
+    }
+  }
   uip_ds6_nbr_t *nbr = nbr_table_head(ds6_neighbors);
   while(nbr != NULL) {
     switch(nbr->state) {
@@ -286,7 +369,7 @@ uip_ds6_neighbor_periodic(void)
       } else if(stimer_expired(&nbr->sendns) && (uip_len == 0)) {
         nbr->nscount++;
         PRINTF("NBR_INCOMPLETE: NS %u\n", nbr->nscount);
-        uip_nd6_ns_output(NULL, NULL, &nbr->ipaddr);
+        uip_nd6_ns_output(NULL, NULL, &nbr->ipaddr,0,0);
         stimer_set(&nbr->sendns, uip_ds6_if.retrans_timer / 1000);
       }
       break;
@@ -311,13 +394,13 @@ uip_ds6_neighbor_periodic(void)
       } else if(stimer_expired(&nbr->sendns) && (uip_len == 0)) {
         nbr->nscount++;
         PRINTF("PROBE: NS %u\n", nbr->nscount);
-        uip_nd6_ns_output(NULL, &nbr->ipaddr, &nbr->ipaddr);
+        uip_nd6_ns_output(NULL, &nbr->ipaddr, &nbr->ipaddr,0,0);
         stimer_set(&nbr->sendns, uip_ds6_if.retrans_timer / 1000);
       }
       break;
     default:
       break;
-    }
+     }
     nbr = nbr_table_next(ds6_neighbors, nbr);
   }
 }
@@ -342,4 +425,179 @@ uip_ds6_get_least_lifetime_neighbor(void)
 }
 #endif /* UIP_ND6_SEND_NA */
 /*---------------------------------------------------------------------------*/
+/**
+ * \brief Removes a registration from the registrations list. It also
+ * decreases the value of the number of registrations of
+ * the corresponding default router
+ *
+ * \param reg  registration to be deleted
+ */
+
+void
+uip_ds6_reg_rm(uip_ds6_reg_t *reg)
+{
+
+  reg->defrt->registrations--;
+  reg->isused = 0;
+}
+/*---------------------------------------------------------------------------*/
+/**
+ * \brief Looks for a registration in the registrations list
+ * \param addr  address whose registration we are looking for
+ * \param defrt  default router with which the address is registered
+ *
+ * \returns reg  registration matching the search
+ * NULL if there are no matches.
+ */
+
+uip_ds6_reg_t *
+uip_ds6_reg_lookup(uip_ds6_addr_t *addr, uip_ds6_defrt_t *defrt)
+{
+
+  uip_ds6_reg_t *reg;
+
+  for(reg = uip_ds6_reg_list;
+      reg < uip_ds6_reg_list + UIP_DS6_REG_LIST_SIZE; reg++) {
+    if((reg->isused) && (reg->addr == addr) && (reg->defrt == defrt)) {
+      return reg;
+    }
+  }
+  return NULL;
+}
+/*---------------------------------------------------------------------------*/
+/**
+ * \brief Removes all registrations with defrt from the registration
+ * list.
+ *
+ * \param defrt  router whose registrations we want to remove
+ *
+ */
+
+void
+uip_ds6_reg_cleanup_defrt(uip_ds6_defrt_t *defrt)
+{
+
+  uip_ds6_reg_t *reg;
+
+  for(reg = uip_ds6_reg_list;
+      reg < uip_ds6_reg_list + UIP_DS6_REG_LIST_SIZE; reg++) {
+    if((reg->isused) && (reg->defrt == defrt)) {
+      uip_ds6_reg_rm(reg);
+    }
+  }
+}
+/*---------------------------------------------------------------------------*/
+/**
+ * \brief Removes all resgitrations of address addr from the
+ * registration list. If the registration is in REGISTERED
+ * state, we can not just delete it, but we MUST first send
+ * a NS with ARO lifetime = 0. As there may be more than one,
+ * we mark it as TO_BE_UNREGISTERED so uip_ds6_periodic can
+ * process them properly.
+ *
+ * \param addr  address whose registrationes we want to remove
+ *
+ */
+
+void
+uip_ds6_reg_cleanup_addr(uip_ds6_addr_t *addr)
+{
+
+  uip_ds6_reg_t *reg;
+
+  for(reg = uip_ds6_reg_list;
+      reg < uip_ds6_reg_list + UIP_DS6_REG_LIST_SIZE; reg++) {
+    if((reg->isused) && (reg->addr == addr)) {
+      if(reg->state != REG_REGISTERED) {
+        uip_ds6_reg_rm(reg);
+      } else {
+        /* Mark it as TO_BE_UNREGISTERED */
+        reg->state = REG_TO_BE_UNREGISTERED;
+      }
+    }
+  }
+}
+/*---------------------------------------------------------------------------*/
+/**
+ * \brief Returns the number of addresses that are registered (or
+ *                                                              pending to be registered) with a router
+ *
+ * \param defrt  router whose number of registrations we want to check
+ *
+ * \returns The number of addresses registered (or pending to be
+ *                                                              registered) with defrt
+ */
+
+uint8_t
+uip_ds6_get_registrations(uip_ds6_defrt_t *defrt)
+{
+
+  if(!((defrt == NULL) || (!defrt->isused))) {
+     return (uint8_t) defrt->registrations;
+  }
+  return 0;
+}
+/*---------------------------------------------------------------------------*/
+/**
+ * \brief Checks whether a NCE can be garbage-collected or not.
+ *
+ * \param nbr  NCE we want to check
+ *
+ * \returns Returns 1 if nbr can be garbage-collected, 0 otherwise.
+ */
+
+uint8_t
+uip_ds6_is_nbr_garbage_collectible(uip_ds6_nbr_t *nbr)
+{
+
+  uip_ds6_reg_t *reg;
+  uip_ds6_defrt_t *defrt;
+
+  defrt =  uip_ds6_defrt_lookup(&nbr->ipaddr);
+
+  for(reg = uip_ds6_reg_list;
+      reg < uip_ds6_reg_list + UIP_DS6_REG_LIST_SIZE; reg++) {
+    if((reg->isused) &&
+       (reg->defrt == defrt) &&
+       (reg->state != REG_GARBAGE_COLLECTIBLE)) {
+      return 0;
+    }
+  }
+  return 1;
+}
+/*---------------------------------------------------------------------------*/
+/**
+ * \brief Returns a default router that meets:
+ *    -has the minimum number of registrations
+ *    - addr is not registered with it
+ *
+ */
+uip_ds6_defrt_t *
+uip_ds6_defrt_choose_min_reg(uip_ds6_addr_t *addr)
+{
+  uint8_t min = 0;
+  uip_ds6_defrt_t *min_defrt = NULL;
+
+  for(locdefrt = uip_ds6_defrt_list;
+      locdefrt < uip_ds6_defrt_list + UIP_DS6_DEFRT_NB; locdefrt++) {
+    if(locdefrt->isused) {
+      if(NULL == uip_ds6_reg_lookup(addr, locdefrt)) {
+        if((min_defrt == NULL) ||
+           ((min_defrt != NULL) && (uip_ds6_get_registrations(locdefrt) < min))) {
+          min_defrt = locdefrt;
+          min = uip_ds6_get_registrations(locdefrt);
+          if(min == 0) {
+            /* We are not going to find a better candidate */
+            return min_defrt;
+          }
+        }
+      }
+    }
+  }
+  return min_defrt;
+}
+/*---------------------------------------------------------------------------*/
+
+
+
 /** @} */

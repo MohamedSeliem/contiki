@@ -57,17 +57,19 @@
 #define UIP_ND6_INFINITE_LIFETIME       0xFFFFFFFF
 /** @} */
 
-/** \name RFC 4861 Host constant */
+/** \name RFC 6775 Host constant */
 /** @{ */
 /** \brief Maximum router solicitation delay */
 #define UIP_ND6_MAX_RTR_SOLICITATION_DELAY 1
 /** \brief Router solicitation interval */
-#define UIP_ND6_RTR_SOLICITATION_INTERVAL  4
+#define UIP_ND6_RTR_SOLICITATION_INTERVAL  10
+/** \brief Maximum router solicitations interval*/
+#define UIP_ND6_MAX_RTR_SOLICITATION_INTERVAL  60
 /** \brief Maximum router solicitations */
 #define UIP_ND6_MAX_RTR_SOLICITATIONS      3
 /** @} */
 
-/** \name RFC 4861 Router constants */
+/** \name RFC 6775 Router constants */
 /** @{ */
 #ifndef UIP_CONF_ND6_SEND_RA
 #define UIP_ND6_SEND_RA                     1   /* enable/disable RA sending */
@@ -101,7 +103,7 @@
 #define UIP_ND6_MIN_DELAY_BETWEEN_RAS       UIP_CONF_ND6_MIN_DELAY_BETWEEN_RAS
 #endif
 //#define UIP_ND6_MAX_RA_DELAY_TIME           0.5 /*seconds*/
-#define UIP_ND6_MAX_RA_DELAY_TIME_MS        500 /*milli seconds*/
+#define UIP_ND6_MAX_RA_DELAY_TIME_MS        2000 /*milli seconds*/
 /** @} */
 
 #ifndef UIP_CONF_ND6_DEF_MAXDADNS
@@ -159,6 +161,19 @@
 /** @} */
 
 
+/** \name RFC 6775  new constants */
+/** @{ */
+   /* This is the lifetime a host puts into the registration lifetime of its ARO options */
+#ifdef UIP_CONF_ND6_REGISTRATION_LIFETIME
+#define UIP_ND6_REGISTRATION_LIFETIME   UIP_CONF_ND6_REGISTRATION_LIFETIME
+#else
+#define UIP_ND6_REGISTRATION_LIFETIME   60      /* In units of 60 seconds, 1 hour */
+#endif /* UIP_CONF_ND6_REGISTRATION_LIFETIME */
+/** @} */
+
+
+   extern struct etimer uip_ds6_timer_ns;
+
 /** \name ND6 option types */
 /** @{ */
 #define UIP_ND6_OPT_SLLAO               1
@@ -168,6 +183,7 @@
 #define UIP_ND6_OPT_MTU                 5
 #define UIP_ND6_OPT_RDNSS               25
 #define UIP_ND6_OPT_DNSSL               31
+#define UIP_ND6_OPT_ARO                 32
 /** @} */
 
 /** \name ND6 option types */
@@ -192,6 +208,7 @@
 #define UIP_ND6_OPT_MTU_LEN            8
 #define UIP_ND6_OPT_RDNSS_LEN          1
 #define UIP_ND6_OPT_DNSSL_LEN          1
+#define UIP_ND6_OPT_ARO_LEN            16
 
 
 /* Length of TLLAO and SLLAO options, it is L2 dependant */
@@ -223,6 +240,13 @@
 #define UIP_ND6_RA_FLAG_AUTONOMOUS      0x40
 /** @} */
 
+/** \name status values used in NAs  */
+/** @{ */
+#define ARO_STATUS_SUCCESS            0
+#define ARO_STATUS_DUPLICATE          1
+#define ARO_STATUS_RTR_NC_FULL        2
+/** @} */
+
 /**
  * \name ND message structures
  * @{
@@ -231,7 +255,7 @@
 /**
  * \brief A neighbor solicitation constant part
  *
- * Possible option is: SLLAO
+ * Possible option is: SLLAO, ARO
  */
 typedef struct uip_nd6_ns {
   uint32_t reserved;
@@ -241,7 +265,7 @@ typedef struct uip_nd6_ns {
 /**
  * \brief A neighbor advertisement constant part.
  *
- * Possible option is: TLLAO
+ * Possible option is: TLLAO, ARO
  */
 typedef struct uip_nd6_na {
   uint8_t flagsreserved;
@@ -322,7 +346,16 @@ typedef struct uip_nd6_opt_dns {
   uint32_t lifetime;
   uip_ipaddr_t ip;
 } uip_nd6_opt_dns;
-
+/** \brief ND option address registration */
+typedef struct uip_nd6_opt_aro {
+  uint8_t type;
+  uint8_t len;
+  uint8_t status;
+  uint8_t reserved1;
+  uint16_t reserved2;
+  uint16_t lifetime;
+  uip_lladdr_t eui64;
+} uip_nd6_opt_aro;
 /** \struct Redirected header option */
 typedef struct uip_nd6_opt_redirected_hdr {
   uint8_t type;
@@ -355,6 +388,7 @@ typedef struct uip_nd6_opt_redirected_hdr {
  * function: set src, dst, tgt address in the three cases, then for all cases
  * set the rest, including  SLLAO
  *
+ *in case of address registration include ARO
  */
 void
 uip_nd6_ns_input(void);
@@ -366,6 +400,11 @@ uip_nd6_ns_input(void);
  * MUST be NULL, for NUD, must be correct unicast dest
  * \param tgt  pointer to ip address to fill the target address field, must
  * not be NULL
+ * \param aro  integer that allow sending Ns message contains Address
+ * Registration option header(ARO)
+ *
+ *\param lifetime  integer holds the life time of the Registered address
+ *in Registration list
  *
  * - RFC 4861, 7.2.2 :
  *   "If the source address of the packet prompting the solicitation is the
@@ -380,12 +419,36 @@ uip_nd6_ns_input(void);
  *   a SLLAO option, otherwise no.
  */
 void
-uip_nd6_ns_output(uip_ipaddr_t *src, uip_ipaddr_t *dest, uip_ipaddr_t *tgt);
+uip_nd6_ns_output(uip_ipaddr_t *src, uip_ipaddr_t *dest, uip_ipaddr_t *tgt, uint8_t aro, uint16_t lifetime);
+
+/**
+ * \brief Process a Neighbor Advertisement
+ *
+ * we might have to send a pkt that had been buffered while address
+ * resolution was performed (if we support buffering, see UIP_CONF_QUEUE_PKT)
+ *
+ * As per RFC 4861, on link layer that have addresses, TLLAO options MUST be
+ * included when responding to multicast solicitations, SHOULD be included in
+ * response to unicast (here we assume it is for now)
+ *
+ * NA can be received after sending NS for DAD, Address resolution, Address registration or NUD. Can
+ * be unsolicited as well.
+ * It can trigger update of the state of the neighbor in the neighbor cache,
+ * router in the router list.
+ * If the NS was for DAD, it means DAD failed
+ *
+ */
+void
+uip_nd6_na_input(void);
 
 #if UIP_CONF_ROUTER
 #if UIP_ND6_SEND_RA
 /**
- * \brief send a Router Advertisement
+ * \brief Process a Router Solicitation
+ *
+ */
+void uip_nd6_rs_input(void);
+ /** \brief send a Router Advertisement
  *
  * Only for router, for periodic as well as sollicited RA
  */
@@ -404,15 +467,28 @@ void uip_nd6_ra_output(uip_ipaddr_t *dest);
  * possible option is SLLAO, MUST NOT be included if source = unspecified
  * SHOULD be included otherwise
  */
-void uip_nd6_rs_output(void);
+void uip_nd6_rs_output(uip_ipaddr_t *rtr_ipaddr);
 
 /**
  * \brief Initialise the uIP ND core
  */
 void uip_nd6_init(void);
+/**
+ *
+ * \brief process a Router Advertisement
+ *
+ * - Possible actions when receiving a RA: add router to router list,
+ *   recalculate reachable time, update link hop limit, update retrans timer.
+ * - If MTU option: update MTU.
+ * - If SLLAO option: update entry in neighbor cache
+ * - If prefix option: start autoconf, add prefix to prefix list
+ */
+void
+uip_nd6_ra_input(void);
 /** @} */
 
-
+void 
+uip_ds6_send_ns_registered(uip_ipaddr_t *dest);
 void
 uip_appserver_addr_get(uip_ipaddr_t *ipaddr);
 /*--------------------------------------*/

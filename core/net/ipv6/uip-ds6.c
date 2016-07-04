@@ -40,6 +40,8 @@
  *    and auto configuration (RFC 4862) state machines.
  * \author Mathilde Durvy <mdurvy@cisco.com>
  * \author Julien Abeille <jabeille@cisco.com>
+ *edited by
+ * \author Mohamed Seliem <mseliem11@gmail.com>
  */
 
 #include <string.h>
@@ -64,14 +66,14 @@ static uint16_t rand_time;                                      /**< random time
 #endif
 #else /* UIP_CONF_ROUTER */
 struct etimer uip_ds6_timer_rs;                                 /**< RS timer, to schedule RS sending */
-static uint8_t rscount;                                         /**< number of rs already sent */
+uint8_t rscount;                                         /**< number of rs already sent */
 #endif /* UIP_CONF_ROUTER */
 
 /** \name "DS6" Data structures */
 /** @{ */
 uip_ds6_netif_t uip_ds6_if;                                     /**< The single interface */
 uip_ds6_prefix_t uip_ds6_prefix_list[UIP_DS6_PREFIX_NB];        /**< Prefix list */
-
+uip_ds6_defrt_t uip_ds6_defrt_list[UIP_DS6_DEFRT_NB];           /**< default router list*/
 /* Used by Cooja to enable extraction of addresses from memory.*/
 uint8_t uip_ds6_addr_size;
 uint8_t uip_ds6_netif_addr_list_offset;
@@ -88,7 +90,9 @@ static uip_ds6_maddr_t *locmaddr;
 static uip_ds6_aaddr_t *locaaddr;
 #endif /* UIP_DS6_AADDR_NB */
 static uip_ds6_prefix_t *locprefix;
-
+#if !UIP_CONF_ROUTER
+static uip_ds6_defrt_t *locdefrt;
+#endif
 /*---------------------------------------------------------------------------*/
 void
 uip_ds6_init(void)
@@ -98,8 +102,8 @@ uip_ds6_init(void)
   uip_ds6_route_init();
 
   PRINTF("Init of IPv6 data structures\n");
-  PRINTF("%u neighbors\n%u default routers\n%u prefixes\n%u routes\n%u unicast addresses\n%u multicast addresses\n%u anycast addresses\n",
-     NBR_TABLE_MAX_NEIGHBORS, UIP_DS6_DEFRT_NB, UIP_DS6_PREFIX_NB, UIP_DS6_ROUTE_NB,
+  PRINTF("%u neighbors\n%u default routers\n%u registrations\n%u prefixes\n%u routes\n%u unicast addresses\n%u multicast addresses\n%u anycast addresses\n",
+     NBR_TABLE_MAX_NEIGHBORS, UIP_DS6_DEFRT_NB,UIP_DS6_REGS_PER_ADDR, UIP_DS6_PREFIX_NB, UIP_DS6_ROUTE_NB,
      UIP_DS6_ADDR_NB, UIP_DS6_MADDR_NB, UIP_DS6_AADDR_NB);
   memset(uip_ds6_prefix_list, 0, sizeof(uip_ds6_prefix_list));
   memset(&uip_ds6_if, 0, sizeof(uip_ds6_if));
@@ -190,13 +194,6 @@ uip_ds6_periodic(void)
 #if UIP_ND6_SEND_NA
   uip_ds6_neighbor_periodic();
 #endif /* UIP_ND6_SEND_RA */
-
-#if UIP_CONF_ROUTER && UIP_ND6_SEND_RA
-  /* Periodic RA sending */
-  if(stimer_expired(&uip_ds6_timer_ra) && (uip_len == 0)) {
-    uip_ds6_send_ra_periodic();
-  }
-#endif /* UIP_CONF_ROUTER && UIP_ND6_SEND_RA */
   etimer_reset(&uip_ds6_timer_periodic);
   return;
 }
@@ -333,6 +330,11 @@ uip_ds6_addr_add(uip_ipaddr_t *ipaddr, unsigned long vlifetime, uint8_t type)
     locaddr->isused = 1;
     uip_ipaddr_copy(&locaddr->ipaddr, ipaddr);
     locaddr->type = type;
+    if(uip_is_addr_linklocal(ipaddr)) {
+      locaddr->state = ADDR_PREFERRED;
+    } else {
+      locaddr->state = ADDR_TENTATIVE;
+    }
     if(vlifetime == 0) {
       locaddr->isinfinite = 1;
     } else {
@@ -348,8 +350,14 @@ uip_ds6_addr_add(uip_ipaddr_t *ipaddr, unsigned long vlifetime, uint8_t type)
 #else /* UIP_ND6_DEF_MAXDADNS > 0 */
     locaddr->state = ADDR_PREFERRED;
 #endif /* UIP_ND6_DEF_MAXDADNS > 0 */
+#if UIP_CONF_ROUTER
+    /*
+     * If 6LoWPAN-ND optimizations are implemented, hosts do not join the
+     * Solicited-node multicast address.
+     */
     uip_create_solicited_node(ipaddr, &loc_fipaddr);
     uip_ds6_maddr_add(&loc_fipaddr);
+#endif /* UIP_CONF_ROUTER */
     return locaddr;
   }
   return NULL;
@@ -630,7 +638,7 @@ uip_ds6_dad_failed(uip_ds6_addr_t *addr)
 #if UIP_CONF_ROUTER
 #if UIP_ND6_SEND_RA
 void
-uip_ds6_send_ra_sollicited(void)
+uip_ds6_send_ra_sollicited(uip_ipaddr_t *dest)
 {
   /* We have a pb here: RA timer max possible value is 1800s,
    * hence we have to use stimers. However, when receiving a RS, we
@@ -638,68 +646,100 @@ uip_ds6_send_ra_sollicited(void)
    * stimers are in seconds, hence we cannot do this. Therefore we just send
    * the RA (setting the timer to 0 below). We keep the code logic for
    * the days contiki will support appropriate timers */
-  rand_time = 0;
+
+  /*need to modify timers and conditions of Delay between RAs*/
   PRINTF("Solicited RA, random time %u\n", rand_time);
-
-  if(stimer_remaining(&uip_ds6_timer_ra) > rand_time) {
-    if(stimer_elapsed(&uip_ds6_timer_ra) < UIP_ND6_MIN_DELAY_BETWEEN_RAS) {
-      /* Ensure that the RAs are rate limited */
-/*      stimer_set(&uip_ds6_timer_ra, rand_time +
-                 UIP_ND6_MIN_DELAY_BETWEEN_RAS -
-                 stimer_elapsed(&uip_ds6_timer_ra));
-  */ } else {
-      stimer_set(&uip_ds6_timer_ra, rand_time);
-    }
-  }
-}
-
-/*---------------------------------------------------------------------------*/
-void
-uip_ds6_send_ra_periodic(void)
-{
-  if(racount > 0) {
-    /* send previously scheduled RA */
-    uip_nd6_ra_output(NULL);
-    PRINTF("Sending periodic RA\n");
-  }
-
-  rand_time = UIP_ND6_MIN_RA_INTERVAL + random_rand() %
-    (uint16_t) (UIP_ND6_MAX_RA_INTERVAL - UIP_ND6_MIN_RA_INTERVAL);
-  PRINTF("Random time 1 = %u\n", rand_time);
-
-  if(racount < UIP_ND6_MAX_INITIAL_RAS) {
-    if(rand_time > UIP_ND6_MAX_INITIAL_RA_INTERVAL) {
-      rand_time = UIP_ND6_MAX_INITIAL_RA_INTERVAL;
-      PRINTF("Random time 2 = %u\n", rand_time);
-    }
-    racount++;
-  }
-  PRINTF("Random time 3 = %u\n", rand_time);
-  stimer_set(&uip_ds6_timer_ra, rand_time);
+  uip_nd6_ra_output(dest);
+  tcpip_ipv6_output();
+  PRINTF("Sending solicited RA\n");
 }
 
 #endif /* UIP_ND6_SEND_RA */
 #else /* UIP_CONF_ROUTER */
 /*---------------------------------------------------------------------------*/
-void
-uip_ds6_send_rs(void)
+/**
+ * This function calculates the c-th term of the binary exponential backoff.
+ * The result is multiplied by factor k and truncated to trunc if greater.
+ */
+uint16_t
+beb_next(uint16_t c, uint16_t k, uint16_t trunc)
 {
-  if((uip_ds6_defrt_choose() == NULL)
-     && (rscount < UIP_ND6_MAX_RTR_SOLICITATIONS)) {
-    PRINTF("Sending RS %u\n", rscount);
-    uip_nd6_rs_output();
-    rscount++;
-    etimer_set(&uip_ds6_timer_rs,
-               UIP_ND6_RTR_SOLICITATION_INTERVAL * CLOCK_SECOND);
-  } else {
-    PRINTF("Router found ? (boolean): %u\n",
-           (uip_ds6_defrt_choose() != NULL));
-    etimer_stop(&uip_ds6_timer_rs);
-  }
-  return;
-}
+  uint16_t result;
 
-#endif /* UIP_CONF_ROUTER */
+  result = (random_rand() % (2 << ((c - 1) - 1))) * k;
+  return result < trunc ? result : trunc;
+}
+/*----------------------------------------------------------------------------*/
+/**
+ * Returns the retransmission interval for a certain retransmission attempt
+ * as specified in RFC6775.
+ */
+uint16_t
+rs_rtx_time(uint16_t rtx_count)
+{
+  if(rtx_count < UIP_ND6_MAX_RTR_SOLICITATIONS) {
+    return UIP_ND6_RTR_SOLICITATION_INTERVAL;
+  } else if(rtx_count > 10) {
+    return UIP_ND6_MAX_RTR_SOLICITATION_INTERVAL;
+  } else {
+    /* Do binary exponential backoff */
+    return beb_next(rtx_count,
+                    UIP_ND6_RTR_SOLICITATION_INTERVAL,
+                    UIP_ND6_MAX_RTR_SOLICITATION_INTERVAL);
+  }
+}
+/*----------------------------------------------------------------------------*/
+
+void
+uip_ds6_send_rs(uip_ds6_defrt_t *defrt)
+{
+  uint8_t unicast_rs = 0;
+  if(!etimer_expired(&uip_ds6_timer_rs)) {
+    return;
+  }
+  locdefrt = NULL;
+  /* First check whether we can unicast the RS to a specific router rather than
+   * multicasting it. */
+  if((defrt != NULL) && (defrt->isused)) {
+    /* Mark this router as "sending_rs" in case it wasn't marked already */
+    defrt->sending_rs = 1;
+    locdefrt = defrt;
+    unicast_rs = 1;
+  } else {
+    for(locdefrt = uip_ds6_defrt_list;
+        locdefrt < uip_ds6_defrt_list + UIP_DS6_DEFRT_NB; locdefrt++) {
+      if((locdefrt->isused) && (locdefrt->sending_rs)) {
+        unicast_rs = 1;
+        break;
+      }
+    }
+  }
+
+  if(unicast_rs) {
+    if(locdefrt->rscount < UIP_ND6_MAX_RTR_SOLICITATIONS) {
+      /* Unicast RS and update count and timer */
+      uip_nd6_rs_output(&locdefrt->ipaddr);
+      locdefrt->rscount = locdefrt->rscount > 10 ? locdefrt->rscount : locdefrt->rscount + 1;
+      etimer_set(&uip_ds6_timer_rs, rs_rtx_time(locdefrt->rscount) * CLOCK_SECOND);
+      return;
+    } else {
+      /* Switch to multicast */
+      locdefrt->sending_rs = 0;
+      rscount = locdefrt->rscount;
+      locdefrt->rscount = 0;
+    }
+  }
+  /* Multicast RS and update RS count and timer */
+  uip_nd6_rs_output(NULL);
+  if(uip_ds6_defrt_choose() == NULL) {
+    PRINTF("send RS \n");
+    rscount = rscount > 10 ? rscount : rscount + 1;
+  } else {
+    rscount = 0;
+/* Make sure we do not send rs more frequently than UIP_ND6_RTR_SOLICITATION_INTERVAL */
+  } etimer_set(&uip_ds6_timer_rs, rs_rtx_time(rscount) * CLOCK_SECOND);
+}
+#endif
 /*---------------------------------------------------------------------------*/
 uint32_t
 uip_ds6_compute_reachable_time(void)

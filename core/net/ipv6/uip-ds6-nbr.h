@@ -41,6 +41,8 @@
  * \author Julien Abeille <jabeille@cisco.com>
  * \author Simon Duquennoy <simonduq@sics.se>
  *
+  *Edited by/
+ * \author Mohamed Seliem <mseliem11@gmail.com>
  */
 
 #ifndef UIP_DS6_NEIGHBOR_H_
@@ -50,6 +52,8 @@
 #include "net/nbr-table.h"
 #include "sys/stimer.h"
 #include "net/ipv6/uip-ds6.h"
+#include "net/nbr-table.h"
+
 #if UIP_CONF_IPV6_QUEUE_PKT
 #include "net/ip/uip-packetqueue.h"
 #endif                          /*UIP_CONF_QUEUE_PKT */
@@ -61,8 +65,43 @@
 #define  NBR_STALE 2
 #define  NBR_DELAY 3
 #define  NBR_PROBE 4
+#define  NO_STATE = 5
+
+/*NO_STATE is for implementation purposes: a router entry contains a pointer
+ * to a neighbor entry, which holds its ip address. If we do not know the LL
+ * address of the router, we do not have to create a neighbor entry as per
+ * RFC 4861. However, we still need to have the IP of the router stored in a
+ * neighbor entry, hence we create an entry in the NO_STATE state
+ */
+/*--------------------------------------------------*/
+/** \brief Possible states for the nbr cache entries */
+/* if 6lowpan-nd is used, new states are defined (new states are
+ * orthogonal to those defined in rfc4861) */
+
+/*---------------------------------------------------------------------------*/
+#define  REG_GARBAGE_COLLECTIBLE 0
+#define  REG_TENTATIVE 1
+#define  REG_REGISTERED 2
+#define  REG_TO_BE_UNREGISTERED 3 /* Auxiliary registration entry state */
+
+/* Neighbor cache */
+#define UIP_DS6_NBR_NBS 0
+#ifndef UIP_CONF_DS6_NBR_NBU
+#define UIP_DS6_NBR_NBU  4
+#else
+#define UIP_DS6_NBR_NBU UIP_CONF_DS6_NBR_NBU
+#endif
+#define UIP_DS6_NBR_NB UIP_DS6_NBR_NBS + UIP_DS6_NBR_NBU
+
+#ifdef UIP_DS6_CONF_REGS_PER_ADDR
+#define UIP_DS6_REGS_PER_ADDR UID_DS6_CONF_REGS_PER_ADDR
+#else
+#define UIP_DS6_REGS_PER_ADDR UIP_DS6_NBR_NB
+#endif
+#define UIP_DS6_REG_LIST_SIZE UIP_DS6_REGS_PER_ADDR * UIP_DS6_ADDR_NB
 
 NBR_TABLE_DECLARE(ds6_neighbors);
+
 
 /** \brief An entry in the nbr cache */
 typedef struct uip_ds6_nbr {
@@ -79,6 +118,7 @@ typedef struct uip_ds6_nbr {
 #define UIP_DS6_NBR_PACKET_LIFETIME CLOCK_SECOND * 4
 #endif                          /*UIP_CONF_QUEUE_PKT */
 } uip_ds6_nbr_t;
+
 
 void uip_ds6_neighbors_init(void);
 
@@ -97,6 +137,8 @@ const uip_lladdr_t *uip_ds6_nbr_lladdr_from_ipaddr(const uip_ipaddr_t *ipaddr);
 void uip_ds6_link_neighbor_callback(int status, int numtx);
 void uip_ds6_neighbor_periodic(void);
 int uip_ds6_nbr_num(void);
+
+uint8_t uip_ds6_is_nbr_garbage_collectible(uip_ds6_nbr_t *nbr);
 
 /**
  * \brief

@@ -66,6 +66,8 @@
  *    Neighbor discovery (RFC 4861)
  * \author Mathilde Durvy <mdurvy@cisco.com>
  * \author Julien Abeille <jabeille@cisco.com>
+ * updated to implement Neighbor discovery (RFC 6775)
+ * \author Mohamed Seliem <mseliem11@gmail.com>
  */
 
 #include <string.h>
@@ -123,6 +125,12 @@ static uip_ds6_nbr_t *nbr; /**  Pointer to a nbr cache entry*/
 static uip_ds6_defrt_t *defrt; /**  Pointer to a router list entry */
 static uip_ds6_addr_t *addr; /**  Pointer to an interface address */
 #endif /* UIP_ND6_SEND_NA || UIP_ND6_SEND_RA || !UIP_CONF_ROUTER */
+static uip_ipaddr_t *temp; /*Temporary location*/
+
+#if UIP_ND6_SEND_NA
+static uip_nd6_opt_aro *nd6_opt_aro;   /**  Pointer to aro option in uip_buf */
+static uip_ds6_reg_t *reg; /**  Pointer to an address registration list entry */
+#endif /* UIP_ND6_SEND_NA*/
 
 #if !UIP_CONF_ROUTER            // TBD see if we move it to ra_input
 static uip_nd6_opt_prefix_info *nd6_opt_prefix_info; /**  Pointer to prefix information option in uip_buf */
@@ -144,6 +152,9 @@ extract_lladdr_from_llao_aligned(uip_lladdr_t *dest) {
   return 0;
 }
 #endif /* UIP_ND6_SEND_NA || UIP_ND6_SEND_RA || !UIP_CONF_ROUTER */
+
+
+struct etimer uip_ds6_timer_ns;                           /** \brief Timer for sending ns message */
 /*------------------------------------------------------------------*/
 /* create a llao */
 static void
@@ -157,7 +168,20 @@ create_llao(uint8_t *llao, uint8_t type) {
 }
 
 /*------------------------------------------------------------------*/
+/* create an aro */
 
+static void
+create_aro(uint8_t *aro, uint16_t lifetime){
+  ((uip_nd6_opt_aro *)aro)->type = UIP_ND6_OPT_ARO;
+  ((uip_nd6_opt_aro *)aro)->len = UIP_ND6_OPT_ARO_LEN >> 3;
+  ((uip_nd6_opt_aro *)aro)->reserved1 = (uint8_t)0;
+  ((uip_nd6_opt_aro *)aro)->reserved2 = (uint16_t)0;
+  ((uip_nd6_opt_aro *)aro)->status = (uint8_t)0;  /* Status: must be set to 0 in NS */
+  ((uip_nd6_opt_aro *)aro)->lifetime = uip_htons(lifetime);
+  memcpy(&(((uip_nd6_opt_aro *)aro)->eui64), &uip_lladdr, UIP_LLADDR_LEN); /* reservered need to be filled */
+}
+
+/*---------------------------------------------------------------------------------------------------------*/
 #if UIP_ND6_SEND_NA
 static void
 ns_input(void)
@@ -183,6 +207,7 @@ ns_input(void)
 
   /* Options processing */
   nd6_opt_llao = NULL;
+  nd6_opt_aro = NULL;
   nd6_opt_offset = UIP_ND6_NS_LEN;
   while(uip_l3_icmp_hdr_len + nd6_opt_offset < uip_len) {
 #if UIP_CONF_IPV6_CHECKS
@@ -204,7 +229,9 @@ ns_input(void)
         uip_lladdr_t lladdr_aligned;
         extract_lladdr_from_llao_aligned(&lladdr_aligned);
         nbr = uip_ds6_nbr_lookup(&UIP_IP_BUF->srcipaddr);
+#if UIP_CONF_ROUTER
         if(nbr == NULL) {
+        /* i am router i will add you and response with NA to add me*/
           uip_ds6_nbr_add(&UIP_IP_BUF->srcipaddr, &lladdr_aligned,
 			  0, NBR_STALE, NBR_TABLE_REASON_IPV6_ND, NULL);
         } else {
@@ -225,10 +252,38 @@ ns_input(void)
             }
           }
         }
+#endif
 #if UIP_CONF_IPV6_CHECKS
       }
 #endif /*UIP_CONF_IPV6_CHECKS */
       break;
+  /**
+     * A router handles NS messages as specified in [RFC4861], with added
+       logic described in RfC 6775 section 6.5. for handling the ARO.*/
+
+    case UIP_ND6_OPT_ARO:
+#if UIP_CONF_ROUTER
+
+      nd6_opt_aro = (uip_nd6_opt_aro *)UIP_ND6_OPT_HDR_BUF;
+#if UIP_CONF_IPV6_CHECKS
+      if((nd6_opt_aro->len != (UIP_ND6_OPT_ARO_LEN >> 3))
+         || (nd6_opt_aro->status != 0) || (nd6_opt_llao) == NULL) {
+
+        /* If the source address of the NS is the unspecified address, or if no
+         * SLLAO is included, then any included ARO is ignored, that is, the NS
+         * is processed as if it did not contain an ARO.ignore this option */
+        nd6_opt_aro = NULL;
+        PRINTF("ND ARO option is not supported in received NS\n");
+      } else {
+        PRINTF("ND ARO option is supported in received NS\n");
+      }
+#endif /* UIP_CONF_IPV6_CHECKS */
+
+#else
+      nd6_opt_aro = NULL;
+#endif
+      break;
+      
     default:
       PRINTF("ND option not supported in NS");
       break;
@@ -251,7 +306,7 @@ ns_input(void)
         uip_create_linklocal_allnodes_mcast(&UIP_IP_BUF->destipaddr);
         uip_ds6_select_src(&UIP_IP_BUF->srcipaddr, &UIP_IP_BUF->destipaddr);
         flags = UIP_ND6_NA_FLAG_OVERRIDE;
-        goto create_na;
+        /*goto create_na;*/
       } else {
           /** \todo if I sent a NS before him, I win */
         uip_ds6_dad_failed(addr);
@@ -276,11 +331,42 @@ ns_input(void)
     }
 #endif /*UIP_CONF_IPV6_CHECKS */
 
+    /*address registration case*/
+    if(nd6_opt_aro != NULL) {
+      reg = uip_ds6_reg_lookup(&UIP_IP_BUF->srcipaddr, &UIP_IP_BUF->destipaddr);
+      if(reg == NULL) {
+        uip_ds6_reg_add(&UIP_IP_BUF->srcipaddr,
+                        (uip_ds6_defrt_t *)(&UIP_IP_BUF->destipaddr), REG_REGISTERED);
+        PRINTF("register address ");
+        PRINT6ADDR(&UIP_IP_BUF->srcipaddr);
+        PRINTF(" with default router ");
+        PRINT6ADDR(&UIP_IP_BUF->destipaddr);
+        PRINTF("\n");
+
+        if(uip_ds6_addr_lookup(&UIP_IP_BUF->destipaddr) == addr) {
+          uip_ipaddr_copy(&UIP_IP_BUF->destipaddr, &UIP_IP_BUF->srcipaddr);
+          uip_ipaddr_copy(&UIP_IP_BUF->srcipaddr, &UIP_ND6_NS_BUF->tgtipaddr);
+          PRINTF(" Registered, send NA in response with destination");
+          PRINT6ADDR(&UIP_IP_BUF->destipaddr);
+          PRINTF("\n");
+          flags = UIP_ND6_NA_FLAG_SOLICITED | UIP_ND6_NA_FLAG_OVERRIDE;
+          goto create_na;
+        }
+      } else if(nd6_opt_aro->lifetime == 0) {
+
+        /* If the lifetime is 0, this means that the un-registration is required;
+         * we can delete the registration entry safely */
+        reg->state = REG_TO_BE_UNREGISTERED;
+        uip_ds6_reg_rm(reg);               /* Remove entry */
+      }
+      /* else update the registery timer; */
+    }
     /* Address resolution case */
     if(uip_is_addr_solicited_node(&UIP_IP_BUF->destipaddr)) {
       uip_ipaddr_copy(&UIP_IP_BUF->destipaddr, &UIP_IP_BUF->srcipaddr);
       uip_ipaddr_copy(&UIP_IP_BUF->srcipaddr, &UIP_ND6_NS_BUF->tgtipaddr);
       flags = UIP_ND6_NA_FLAG_SOLICITED | UIP_ND6_NA_FLAG_OVERRIDE;
+      PRINTF(" Address Resolution, send NA in response \n");
       goto create_na;
     }
 
@@ -289,6 +375,7 @@ ns_input(void)
       uip_ipaddr_copy(&UIP_IP_BUF->destipaddr, &UIP_IP_BUF->srcipaddr);
       uip_ipaddr_copy(&UIP_IP_BUF->srcipaddr, &UIP_ND6_NS_BUF->tgtipaddr);
       flags = UIP_ND6_NA_FLAG_SOLICITED | UIP_ND6_NA_FLAG_OVERRIDE;
+      PRINTF(" NUD case, send NA in response \n");
       goto create_na;
     } else {
 #if UIP_CONF_IPV6_CHECKS
@@ -311,7 +398,17 @@ create_na:
   UIP_IP_BUF->tcflow = 0;
   UIP_IP_BUF->flow = 0;
   UIP_IP_BUF->len[0] = 0;       /* length will not be more than 255 */
-  UIP_IP_BUF->len[1] = UIP_ICMPH_LEN + UIP_ND6_NA_LEN + UIP_ND6_OPT_LLAO_LEN;
+  #if UIP_CONF_ROUTER
+    /* in case ARO with status"Mohamed" */
+    if(flags == (UIP_ND6_NA_FLAG_SOLICITED | UIP_ND6_NA_FLAG_OVERRIDE | UIP_ND6_NA_FLAG_ROUTER)) {
+      UIP_IP_BUF->len[1] = UIP_ICMPH_LEN + UIP_ND6_NA_LEN + UIP_ND6_OPT_LLAO_LEN + UIP_ND6_OPT_ARO_LEN;
+    } else {
+      UIP_IP_BUF->len[1] = UIP_ICMPH_LEN + UIP_ND6_NA_LEN + UIP_ND6_OPT_LLAO_LEN;
+    }
+#else
+    UIP_IP_BUF->len[1] = UIP_ICMPH_LEN + UIP_ND6_NA_LEN + UIP_ND6_OPT_LLAO_LEN;
+#endif
+
   UIP_IP_BUF->proto = UIP_PROTO_ICMP6;
   UIP_IP_BUF->ttl = UIP_ND6_HOP_LIMIT;
 
@@ -324,11 +421,33 @@ create_na:
   create_llao(&uip_buf[uip_l2_l3_icmp_hdr_len + UIP_ND6_NA_LEN],
               UIP_ND6_OPT_TLLAO);
 
-  UIP_ICMP_BUF->icmpchksum = 0;
-  UIP_ICMP_BUF->icmpchksum = ~uip_icmp6chksum();
+#if UIP_CONF_ROUTER
 
-  uip_len =
-    UIP_IPH_LEN + UIP_ICMPH_LEN + UIP_ND6_NA_LEN + UIP_ND6_OPT_LLAO_LEN;
+    /* in case ARO with status"Mohamed" */
+    if(flags == (UIP_ND6_NA_FLAG_SOLICITED | UIP_ND6_NA_FLAG_OVERRIDE | UIP_ND6_NA_FLAG_ROUTER)) {
+      create_aro(&uip_buf[uip_l2_l3_icmp_hdr_len + UIP_ND6_NA_LEN + UIP_ND6_OPT_LLAO_LEN],
+                 UIP_ND6_REGISTRATION_LIFETIME);
+      ((uip_nd6_opt_aro *)&uip_buf[uip_l2_l3_icmp_hdr_len + UIP_ND6_NA_LEN + UIP_ND6_OPT_LLAO_LEN])->status = ARO_STATUS_DUPLICATE;
+    }
+#endif
+    UIP_ICMP_BUF->icmpchksum = 0;
+    UIP_ICMP_BUF->icmpchksum = ~uip_icmp6chksum();
+
+#if UIP_CONF_ROUTER
+    /* in case ARO with status"Mohamed" */
+    if(flags == (UIP_ND6_NA_FLAG_SOLICITED | UIP_ND6_NA_FLAG_OVERRIDE | UIP_ND6_NA_FLAG_ROUTER)) {
+      uip_len =
+        UIP_IPH_LEN + UIP_ICMPH_LEN + UIP_ND6_NA_LEN + UIP_ND6_OPT_LLAO_LEN + UIP_ND6_OPT_ARO_LEN;
+      PRINTF("ARO supported in NA message \n");
+    } else {
+      uip_len =
+        UIP_IPH_LEN + UIP_ICMPH_LEN + UIP_ND6_NA_LEN + UIP_ND6_OPT_LLAO_LEN;
+      PRINTF("ARO not supported in NA message \n");
+    }
+#else
+    uip_len =
+      UIP_IPH_LEN + UIP_ICMPH_LEN + UIP_ND6_NA_LEN + UIP_ND6_OPT_LLAO_LEN;
+#endif
 
   UIP_STAT(++uip_stat.nd6.sent);
   PRINTF("Sending NA to ");
@@ -349,7 +468,7 @@ discard:
 
 /*------------------------------------------------------------------*/
 void
-uip_nd6_ns_output(uip_ipaddr_t * src, uip_ipaddr_t * dest, uip_ipaddr_t * tgt)
+uip_nd6_ns_output(uip_ipaddr_t * src, uip_ipaddr_t * dest, uip_ipaddr_t * tgt, uint8_t aro, uint16_t lifetime)
 {
   uip_ext_len = 0;
   UIP_IP_BUF->vtc = 0x60;
@@ -389,8 +508,19 @@ uip_nd6_ns_output(uip_ipaddr_t * src, uip_ipaddr_t * dest, uip_ipaddr_t * tgt)
     create_llao(&uip_buf[uip_l2_l3_icmp_hdr_len + UIP_ND6_NS_LEN],
                 UIP_ND6_OPT_SLLAO);
 
-    uip_len =
-      UIP_IPH_LEN + UIP_ICMPH_LEN + UIP_ND6_NS_LEN + UIP_ND6_OPT_LLAO_LEN;
+  if(aro) {
+        UIP_IP_BUF->len[1] =
+          UIP_ICMPH_LEN + UIP_ND6_NS_LEN + UIP_ND6_OPT_LLAO_LEN + UIP_ND6_OPT_ARO_LEN;
+        create_aro(&uip_buf[uip_l2_l3_icmp_hdr_len + UIP_ND6_NS_LEN + UIP_ND6_OPT_LLAO_LEN],
+                   lifetime);
+        uip_len =
+          UIP_IPH_LEN + UIP_ICMPH_LEN + UIP_ND6_NS_LEN + UIP_ND6_OPT_LLAO_LEN + UIP_ND6_OPT_ARO_LEN;
+        PRINTF("ARO supported in this message\n");
+      } else {
+        PRINTF("ARO is not supported in this message\n");
+        uip_len =
+          UIP_IPH_LEN + UIP_ICMPH_LEN + UIP_ND6_NS_LEN + UIP_ND6_OPT_LLAO_LEN;
+      }
   } else {
     uip_create_unspecified(&UIP_IP_BUF->srcipaddr);
     UIP_IP_BUF->len[1] = UIP_ICMPH_LEN + UIP_ND6_NS_LEN;
@@ -446,6 +576,7 @@ na_input(void)
   PRINT6ADDR((uip_ipaddr_t *) (&UIP_ND6_NA_BUF->tgtipaddr));
   PRINTF("\n");
   UIP_STAT(++uip_stat.nd6.recv);
+  etimer_stop(&uip_ds6_timer_ns);
 
   /*
    * booleans. the three last one are not 0 or 1 but 0 or 0x80, 0x40, 0x20
@@ -457,6 +588,28 @@ na_input(void)
     ((UIP_ND6_NA_BUF->flagsreserved & UIP_ND6_NA_FLAG_SOLICITED));
   is_override =
     ((UIP_ND6_NA_BUF->flagsreserved & UIP_ND6_NA_FLAG_OVERRIDE));
+#if !UIP_CONF_ROUTER
+/* We are not interested in NA messages not coming from a router */
+    if(!is_router) {
+      nbr = uip_ds6_nbr_lookup(&UIP_IP_BUF->srcipaddr);
+      if(nbr != NULL) {
+        uip_ds6_nbr_rm(nbr);
+      }
+      defrt = uip_ds6_defrt_lookup(&UIP_IP_BUF->srcipaddr);
+      if(defrt != NULL) {
+        uip_ds6_defrt_rm(defrt);
+        /* Since we are deleting a default router, we must delete also all
+         * registrations with that router. */
+        uip_ds6_reg_cleanup_defrt(defrt);
+        /* We will also need to start sending RS, as specified in RFC 6775
+         * for a router that has become unreachable */
+#if !UIP_CONF_ROUTER
+        uip_ds6_send_rs(NULL);
+#endif
+      }
+      goto discard;
+    }
+#endif /* !UIP_CONF_ROUTER */
 
 #if UIP_CONF_IPV6_CHECKS
   if((UIP_IP_BUF->ttl != UIP_ND6_HOP_LIMIT) ||
@@ -468,9 +621,11 @@ na_input(void)
   }
 #endif /*UIP_CONF_IPV6_CHECKS */
 
-  /* Options processing: we handle TLLAO, and must ignore others */
+  /* Options processing: we handle TLLAO, (if RFC6775 is used) ARO,
+     * and must ignore others */
   nd6_opt_offset = UIP_ND6_NA_LEN;
   nd6_opt_llao = NULL;
+  nd6_opt_aro = NULL;
   while(uip_l3_icmp_hdr_len + nd6_opt_offset < uip_len) {
 #if UIP_CONF_IPV6_CHECKS
     if(UIP_ND6_OPT_HDR_BUF->len == 0) {
@@ -482,6 +637,16 @@ na_input(void)
     case UIP_ND6_OPT_TLLAO:
       nd6_opt_llao = (uint8_t *)UIP_ND6_OPT_HDR_BUF;
       break;
+    case UIP_ND6_OPT_ARO:
+        nd6_opt_aro = (uip_nd6_opt_aro *)UIP_ND6_OPT_HDR_BUF;
+#if UIP_CONF_IPV6_CHECKS
+        if((nd6_opt_aro->len != (UIP_ND6_OPT_ARO_LEN >> 3)) ||
+           (memcmp(&nd6_opt_aro->eui64, &uip_lladdr, UIP_LLADDR_LEN) != 0)) {
+          /* ignore this option */
+          nd6_opt_aro = NULL;
+        }
+#endif /* UIP_CONF_IPV6_CHECKS */
+        break;
     default:
       PRINTF("ND option not supported in NA\n");
       break;
@@ -513,6 +678,48 @@ na_input(void)
         memcmp(&nd6_opt_llao[UIP_ND6_OPT_DATA_OFFSET], lladdr,
                UIP_LLADDR_LEN);
     }
+    if(nd6_opt_aro != NULL) {
+        reg = uip_ds6_if.registration_in_progress;
+        if(reg != NULL) {
+          if((nd6_opt_aro->lifetime == 0) && (reg->state == REG_TO_BE_UNREGISTERED)) {
+            /* If the lifetime is 0, this means that the un-registration was successful;
+             * we can delete the registration entry safely */
+            uip_ds6_reg_rm(reg); /* Remove entry */
+          } else {
+            addr = uip_ds6_addr_lookup(&UIP_IP_BUF->destipaddr);
+            switch(nd6_opt_aro->status) {
+            case ARO_STATUS_SUCCESS:
+              /* Make sure this is actually the address we are registering */
+              if(reg->addr == addr) {
+                /* Clear the NS count */
+                addr->state = ADDR_PREFERRED;
+                reg->state = REG_REGISTERED;
+                reg->reg_count = 0;
+                stimer_set(&reg->reg_lifetime, uip_ntohs(nd6_opt_aro->lifetime) * 60);
+                uip_ds6_if.registration_in_progress = NULL;
+              }
+              break;
+            case ARO_STATUS_DUPLICATE:
+              /* Remove the address */
+              uip_ds6_addr_rm(addr);
+              /* Clear registration_in_progress so that other registrations can occur */
+              uip_ds6_if.registration_in_progress = NULL;
+              /* If we have registered the address with any other router, we must void
+               * such registrations by sending a ns with ARO with 0 lifetime */
+              uip_ds6_reg_cleanup_addr(addr);
+              break;
+            case ARO_STATUS_RTR_NC_FULL:
+              /* Remove entry. uip_ds6_periodic will try with other def. router
+               * if possible */
+              uip_ds6_reg_rm(reg);
+              uip_ds6_if.registration_in_progress = NULL;
+              break;
+            default:
+              break;
+            }
+          }
+        }
+     }
     if(nbr->state == NBR_INCOMPLETE) {
       if(nd6_opt_llao == NULL || !extract_lladdr_from_llao_aligned(&lladdr_aligned)) {
         goto discard;
@@ -677,8 +884,8 @@ rs_input(void)
 #endif /*UIP_CONF_IPV6_CHECKS */
   }
 
-  /* Schedule a sollicited RA */
-  uip_ds6_send_ra_sollicited();
+/* Schedule a sollicited RA */
+    uip_ds6_send_ra_sollicited(&UIP_IP_BUF->srcipaddr);
 
 discard:
   uip_clear_buf();
@@ -798,14 +1005,18 @@ uip_nd6_ra_output(uip_ipaddr_t * dest)
 #if !UIP_CONF_ROUTER
 /*---------------------------------------------------------------------------*/
 void
-uip_nd6_rs_output(void)
+uip_nd6_rs_output(uip_ipaddr_t *rtr_ipaddr)
 {
   UIP_IP_BUF->vtc = 0x60;
   UIP_IP_BUF->tcflow = 0;
   UIP_IP_BUF->flow = 0;
   UIP_IP_BUF->proto = UIP_PROTO_ICMP6;
   UIP_IP_BUF->ttl = UIP_ND6_HOP_LIMIT;
-  uip_create_linklocal_allrouters_mcast(&UIP_IP_BUF->destipaddr);
+    if(rtr_ipaddr != NULL) {
+      uip_ipaddr_copy(&UIP_IP_BUF->destipaddr, rtr_ipaddr);
+    } else {
+      uip_create_linklocal_allrouters_mcast(&UIP_IP_BUF->destipaddr);
+    }
   uip_ds6_select_src(&UIP_IP_BUF->srcipaddr, &UIP_IP_BUF->destipaddr);
   UIP_ICMP_BUF->type = ICMP6_RS;
   UIP_ICMP_BUF->icode = 0;
@@ -1041,6 +1252,7 @@ ra_input(void)
       nbr->isrouter = 1;
     }
     if(defrt == NULL) {
+      PRINTF("new default router \n");
       uip_ds6_defrt_add(&UIP_IP_BUF->srcipaddr,
                         (unsigned
                          long)(uip_ntohs(UIP_ND6_RA_BUF->router_lifetime)));
@@ -1123,5 +1335,18 @@ uip_nd6_init()
   uip_icmp6_register_input_handler(&ra_input_handler);
 #endif
 }
+/*---------------------------------------------------------------------------*/
+  void
+  uip_ds6_send_ns_registered(uip_ipaddr_t *dest)
+  {
+    PRINTF("Sending registered NS message :) \n");
+    if(dest == NULL) {
+      dest = temp;
+    } else {
+      temp = dest;
+    } uip_nd6_ns_output(NULL, dest, dest, 1, UIP_ND6_REGISTRATION_LIFETIME);
+    tcpip_ipv6_output();
+    etimer_reset(&uip_ds6_timer_periodic);
+  }
 /*---------------------------------------------------------------------------*/
  /** @} */

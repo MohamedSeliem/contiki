@@ -36,6 +36,8 @@
 /**
  * \file
  *    Header file for routing table manipulation
+ *Edited by/
+ * \author Mohamed Seliem <mseliem11@gmail.com>
  */
 #ifndef UIP_DS6_ROUTE_H
 #define UIP_DS6_ROUTE_H
@@ -44,6 +46,7 @@
 #include "net/nbr-table.h"
 #include "sys/stimer.h"
 #include "lib/list.h"
+#include "net/ipv6/uip-ds6-nbr.h"
 
 NBR_TABLE_DECLARE(nbr_routes);
 
@@ -170,25 +173,6 @@ struct uip_ds6_route_neighbor_route {
   struct uip_ds6_route_neighbor_route *next;
   struct uip_ds6_route *route;
 };
-
-/** \brief An entry in the default router list */
-typedef struct uip_ds6_defrt {
-  struct uip_ds6_defrt *next;
-  uip_ipaddr_t ipaddr;
-  struct stimer lifetime;
-  uint8_t isinfinite;
-} uip_ds6_defrt_t;
-
-/** \name Default router list basic routines */
-/** @{ */
-uip_ds6_defrt_t *uip_ds6_defrt_add(uip_ipaddr_t *ipaddr,
-                                   unsigned long interval);
-void uip_ds6_defrt_rm(uip_ds6_defrt_t *defrt);
-uip_ds6_defrt_t *uip_ds6_defrt_lookup(uip_ipaddr_t *ipaddr);
-uip_ipaddr_t *uip_ds6_defrt_choose(void);
-
-void uip_ds6_defrt_periodic(void);
-/** @} */
 
 
 /** \name Routing Table basic routines */
