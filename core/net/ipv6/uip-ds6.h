@@ -8,8 +8,7 @@
  *    Header file for IPv6-related data structures
  * \author Mathilde Durvy <mdurvy@cisco.com>
  * \author Julien Abeille <jabeille@cisco.com>
- *Edited by/
- * \author Mohamed Seliem <mseliem11@gmail.com>
+ *
  */
 /*
  *
@@ -46,7 +45,12 @@
 #include "net/ip/uip.h"
 #include "sys/stimer.h"
 /* The size of uip_ds6_addr_t depends on UIP_ND6_DEF_MAXDADNS. Include uip-nd6.h to define it. */
+#if !(UIP_CONF_IPv6_LOWPAN_ND)
 #include "net/ipv6/uip-nd6.h"
+#else
+#include "net/ipv6/uip-6lowpan-nd6.h"
+#include "net/ipv6/uip-ds6-reg.h"
+#endif
 #include "net/ipv6/uip-ds6-route.h"
 #include "net/ipv6/uip-ds6-nbr.h"
 
@@ -57,8 +61,6 @@
  * - the number of elements requested by the user in contiki configuration (name suffixed by _NBU)
  * - the number of elements assigned by the system (name suffixed by _NBS)
  * - the total number of elements is the sum (name suffixed by _NB)
- * The routing table definitions can be found in uip-ds6-route.h
- * The Neighbor cache definitions can be found in nbr-table.h
 */
 
 /* Default router list */
@@ -152,28 +154,6 @@
 #define UIP_DS6_LL_NUD UIP_CONF_DS6_LL_NUD
 #endif
 
-/** \brief The host SHOULD start sending Router Solicitations "well before the
- * minimum of those lifetimes" (across all the prefixes and all the
- * contexts) expire. RFC 6775. We define thus a threshold
- * value to start sending RS messages (in seconds).*/
-#ifdef  UIP_DS6_CONF_LIFETIME_THRESHOLD
-#define UIP_DS6_LIFETIME_THRESHOLD UIP_DS6_CONF_LIFETIME_THRESHOLD
-#else
-#define UIP_DS6_LIFETIME_THRESHOLD 60
-#endif
-
-/* 6lowpan-nd default lifetimes (in seconds)*/
-#ifdef UIP_DS6_GARBAGE_COLLECTIBLE_REG_LIFETIME
-#define UIP_DS6_GARBAGE_COLLECTIBLE_REG_LIFETIME UIP_DS6_GARBAGE_COLLECTIBLE_REG_LIFETIME
-#else
-#define UIP_DS6_GARBAGE_COLLECTIBLE_REG_LIFETIME 20
-#endif
-#ifdef UIP_DS6_TENTATIVE_REG_LIFETIME
-#define UIP_DS6_TENTATIVE_REG_LIFETIME UIP_DS6_TENTATIVE_REG_LIFETIME
-#else
-#define UIP_DS6_TENTATIVE_REG_LIFETIME 20 /* Default value in RFC 6775*/
-#endif
-
 /** \brief Possible states for the an address  (RFC 4862) */
 #define ADDR_TENTATIVE 0
 #define ADDR_PREFERRED 1
@@ -202,17 +182,6 @@
 #include "net/ip/uip-packetqueue.h"
 #endif                          /*UIP_CONF_QUEUE_PKT */
 
-/** \brief A default router list entry */
-typedef struct uip_ds6_defrt {
-  uint8_t isused;
-  uip_ipaddr_t ipaddr;
-  struct stimer lifetime;
-  uint8_t isinfinite;
-  uint8_t sending_rs;
-  uint8_t rscount; /* 6lowpan-nd fields required to maintain a counter of RSs sent to a particular default router */
-  uint8_t registrations;/* The number of registrations with a router */
-} uip_ds6_defrt_t;
-
 /** \brief A prefix list entry */
 #if UIP_CONF_ROUTER
 typedef struct uip_ds6_prefix {
@@ -230,14 +199,11 @@ typedef struct uip_ds6_prefix {
   uip_ipaddr_t ipaddr;
   uint8_t length;
   struct stimer vlifetime;
-  uip_ds6_defrt_t *defrt; /** The router that announced this prefix */
   uint8_t isinfinite;
 } uip_ds6_prefix_t;
 #endif /*UIP_CONF_ROUTER */
 
-
-
-/**  \brief Unicast address structure */
+/** * \brief Unicast address structure */
 typedef struct uip_ds6_addr {
   uint8_t isused;
   uip_ipaddr_t ipaddr;
@@ -245,23 +211,11 @@ typedef struct uip_ds6_addr {
   uint8_t type;
   uint8_t isinfinite;
   struct stimer vlifetime;
-  uip_ds6_defrt_t *defrt;
 #if UIP_ND6_DEF_MAXDADNS > 0
   struct timer dadtimer;
   uint8_t dadnscount;
 #endif /* UIP_ND6_DEF_MAXDADNS > 0 */
 } uip_ds6_addr_t;
-
-/** \brief Structure to handle 6lowpan-nd registrations */
-typedef struct uip_ds6_reg {
-  uint8_t isused;
-  uint8_t state;
-  uip_ds6_addr_t *addr;
-  uip_ds6_defrt_t *defrt;
-  struct stimer reg_lifetime;
-  struct timer registration_timer;
-  uint8_t reg_count;
-} uip_ds6_reg_t;
 
 /** \brief Anycast address  */
 typedef struct uip_ds6_aaddr {
@@ -296,7 +250,9 @@ typedef struct uip_ds6_netif {
   uint32_t base_reachable_time; /* in msec */
   uint32_t reachable_time;      /* in msec */
   uint32_t retrans_timer;       /* in msec */
-  uip_ds6_reg_t *registration_in_progress;
+#if UIP_CONF_IPv6_LOWPAN_ND
+  uip_ds6_reg_t* registration_in_progress;
+#endif
   uint8_t maxdadns;
 #if UIP_DS6_ADDR_NB
   uip_ds6_addr_t addr_list[UIP_DS6_ADDR_NB];
@@ -334,7 +290,8 @@ void uip_ds6_init(void);
 /** \brief Periodic processing of data structures */
 void uip_ds6_periodic(void);
 
-/** \brief Generic loop routine on an abstract data structure, which generalizes all data structures used in DS6 */
+/** \brief Generic loop routine on an abstract data structure, which generalizes
+ * all data structures used in DS6 */
 uint8_t uip_ds6_list_loop(uip_ds6_element_t *list, uint8_t size,
                           uint16_t elementsize, uip_ipaddr_t *ipaddr,
                           uint8_t ipaddrlen,
@@ -361,33 +318,9 @@ uint8_t uip_ds6_is_addr_onlink(uip_ipaddr_t *ipaddr);
 
 /** @} */
 
-
-/** \name Default router list basic routines */
-/** @{ */
-uip_ds6_defrt_t *uip_ds6_defrt_add(uip_ipaddr_t *ipaddr,
-                                   unsigned long interval);
-void uip_ds6_defrt_rm(uip_ds6_defrt_t *defrt);
-uip_ipaddr_t *uip_ds6_defrt_choose(void);
-uip_ds6_defrt_t *uip_ds6_defrt_lookup(uip_ipaddr_t *ipaddr);
-void uip_ds6_defrt_periodic(void);
-/** @} */
-
-
-/** \brief Neighbor Registeration list basic routines */
-/** @{ */
-uip_ds6_reg_t *uip_ds6_reg_add(uip_ds6_addr_t *addr, uip_ds6_defrt_t *defrt,
-                               uint8_t state);
-void uip_ds6_reg_rm(uip_ds6_reg_t *reg);
-uip_ds6_reg_t *uip_ds6_reg_lookup(uip_ds6_addr_t *addr, uip_ds6_defrt_t *defrt);
-void uip_ds6_reg_cleanup_defrt(uip_ds6_defrt_t *defrt);
-void uip_ds6_reg_cleanup_addr(uip_ds6_addr_t *addr);
-
-uint8_t uip_ds6_get_registrations(uip_ds6_defrt_t *defrt);
-uip_ds6_defrt_t *uip_ds6_defrt_choose_min_reg(uip_ds6_addr_t *addr);
-/** @} */
-
 /** \name Unicast address list basic routines */
 /** @{ */
+/** \brief Add a unicast address to the interface */
 uip_ds6_addr_t *uip_ds6_addr_add(uip_ipaddr_t *ipaddr,
                                  unsigned long vlifetime, uint8_t type);
 void uip_ds6_addr_rm(uip_ds6_addr_t *addr);
@@ -434,10 +367,13 @@ void uip_ds6_select_src(uip_ipaddr_t *src, uip_ipaddr_t *dst);
 #if UIP_CONF_ROUTER
 #if UIP_ND6_SEND_RA
 /** \brief Send a RA as an asnwer to a RS */
-void uip_ds6_send_ra_sollicited(uip_ipaddr_t *dest);
+void uip_ds6_send_ra_sollicited(uip_ipaddr_t * dest);
 
+#if !(UIP_CONF_IPV6_LOWPAN_ND)
 /** \brief Send a periodic RA */
 void uip_ds6_send_ra_periodic(void);
+#endif
+
 #endif /* UIP_ND6_SEND_RA */
 #else /* UIP_CONF_ROUTER */
 /** \brief Send periodic RS to find router */

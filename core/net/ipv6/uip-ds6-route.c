@@ -37,8 +37,6 @@
 /**
  * \file
  *    Routing table manipulation
- *edited by
- * \author Mohamed Seliem <mseliem11@gmail.com>
  */
 #include "net/ipv6/uip-ds6.h"
 #include "net/ip/uip.h"
@@ -573,7 +571,6 @@ uip_ds6_route_rm_by_nexthop(uip_ipaddr_t *nexthop)
   rm_routelist(routes);
 #endif /* (UIP_CONF_MAX_ROUTES != 0) */
 }
-
 /*---------------------------------------------------------------------------*/
 uip_ds6_defrt_t *
 uip_ds6_defrt_add(uip_ipaddr_t *ipaddr, unsigned long interval)

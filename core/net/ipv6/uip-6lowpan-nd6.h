@@ -38,15 +38,14 @@
 /**
  * \file
  *    Header file for IPv6 Neighbor discovery (RFC 4861)
- * \author Julien Abeille <jabeille@cisco.com>
- * \author Mathilde Durvy <mdurvy@cisco.com>
+ * \author Mohamed Seliem <mseliem11@gmail.com>
  */
-
-#ifndef UIP_ND6_H_
-#define UIP_ND6_H_
+#ifndef UIP_6LOWPAN_ND6_H_
+#define UIP_6LOWPAN_ND6_H_
 
 #include "net/ip/uip.h"
 #include "sys/stimer.h"
+
 /**
  *  \name General
  * @{
@@ -55,6 +54,7 @@
 #define UIP_ND6_HOP_LIMIT               255
 /** \brief INFINITE lifetime */
 #define UIP_ND6_INFINITE_LIFETIME       0xFFFFFFFF
+
 /** @} */
 
 /** \name RFC 4861 Host constant */
@@ -62,9 +62,11 @@
 /** \brief Maximum router solicitation delay */
 #define UIP_ND6_MAX_RTR_SOLICITATION_DELAY 1
 /** \brief Router solicitation interval */
-#define UIP_ND6_RTR_SOLICITATION_INTERVAL  4
+#define UIP_ND6_RTR_SOLICITATION_INTERVAL  10
 /** \brief Maximum router solicitations */
 #define UIP_ND6_MAX_RTR_SOLICITATIONS      3
+/** \brief Maximum router solicitations interval*/
+#define UIP_ND6_MAX_RTR_SOLICITATION_INTERVAL  60
 /** @} */
 
 /** \name RFC 4861 Router constants */
@@ -96,12 +98,34 @@
 #define UIP_ND6_MAX_INITIAL_RA_INTERVAL     16  /*seconds*/
 #define UIP_ND6_MAX_INITIAL_RAS             3   /*transmissions*/
 #ifndef UIP_CONF_ND6_MIN_DELAY_BETWEEN_RAS
-#define UIP_ND6_MIN_DELAY_BETWEEN_RAS       3   /*seconds*/
+#define UIP_ND6_MIN_DELAY_BETWEEN_RAS       10   /*seconds*/
 #else
 #define UIP_ND6_MIN_DELAY_BETWEEN_RAS       UIP_CONF_ND6_MIN_DELAY_BETWEEN_RAS
 #endif
-//#define UIP_ND6_MAX_RA_DELAY_TIME           0.5 /*seconds*/
-#define UIP_ND6_MAX_RA_DELAY_TIME_MS        500 /*milli seconds*/
+#define UIP_ND6_TENTATIVE_NCE_LIFETIME	    20
+//#define UIP_ND6_MAX_RA_DELAY_TIME           2 /*seconds*/
+#define UIP_ND6_MAX_RA_DELAY_TIME_MS        2000 /*milli seconds*/
+
+#define UIP_ND6_MULTIHOP_HOPLIMIT	    64 
+
+#ifndef UIP_ND6_MIN_CONTEXT_CHANGE_DELAY
+#define UIP_ND6_MIN_CONTEXT_CHANGE_DELAY    300
+#else
+#define UIP_ND6_MIN_CONTEXT_CHANGE_DELAY    UIP_ND6_MIN_CONTEXT_CHANGE_DELAY
+#endif
+
+#ifndef UIP_ND6_CONTEXT_VALID_LIFETIME
+#define UIP_ND6_CONTEXT_VALID_LIFETIME      2  /*minutes*/
+#else
+#define UIP_ND6_CONTEXT_VALID_LIFETIME    UIP_ND6_CONTEXT_VALID_LIFETIME
+#endif
+
+#ifndef UIP_ND6_ROUTER_INFO_VALID_LIFETIME
+#define UIP_ND6_ROUTER_INFO_VALID_LIFETIME  2  /*minutes*/
+#else
+#define UIP_ND6_ROUTER_INFO_VALID_LIFETIME  UIP_ND6_ROUTER_INFO_VALID_LIFETIME
+#endif
+
 /** @} */
 
 #ifndef UIP_CONF_ND6_DEF_MAXDADNS
@@ -116,6 +140,7 @@
 #endif /* UIP_CONF_ND6_DEF_MAXDADNS */
 
 /** \name RFC 4861 Node constant */
+/** @{ */
 #define UIP_ND6_MAX_MULTICAST_SOLICIT  3
 
 #ifdef UIP_CONF_ND6_MAX_UNICAST_SOLICIT
@@ -136,11 +161,24 @@
 #define UIP_ND6_RETRANS_TIMER          1000
 #endif
 
+#ifndef UIP_ND6_REGISTRATION_LIFETIME
+#define UIP_ND6_REGISTRATION_LIFETIME  2  /*minutes*/
+#else
+#define UIP_ND6_REGISTRATION_LIFETIME  UIP_ND6_REGISTRATION_LIFETIME
+#endif
+
 #define UIP_ND6_DELAY_FIRST_PROBE_TIME 5
 #define UIP_ND6_MIN_RANDOM_FACTOR(x)   (x / 2)
 #define UIP_ND6_MAX_RANDOM_FACTOR(x)   ((x) + (x) / 2)
 /** @} */
 
+
+/** \brief The Status values used in NAs */
+#if	UIP_CONF_ND6_SEND_NA
+#define UIP_ND6_ARO_SUCCESS		0
+#define UIP_ND6_ARO_DUPLICATE_ADDRESS	1
+#define UIP_ND6_ARO_NCE_FULL		2
+#endif
 
 /** \name RFC 6106 RA DNS Options Constants  */
 /** @{ */
@@ -157,7 +195,20 @@
 #define UIP_ND6_RA_DNSSL                UIP_CONF_ND6_RA_DNSSL
 #endif
 /** @} */
+/** \name RFC 6775 RA 6co,abro Options Constants  */
+/** @{ */
+#ifndef UIP_CONF_ND6_RA_6CO
+#define UIP_ND6_RA_6CO               0
+#else
+#define UIP_ND6_RA_6CO               UIP_CONF_ND6_RA_6CO
+#endif
 
+#ifndef UIP_CONF_ND6_RA_ABRO
+#define UIP_ND6_RA_ABRO                0
+#else
+#define UIP_ND6_RA_ABRO                UIP_CONF_ND6_RA_ABRO
+#endif
+/** @} */
 
 /** \name ND6 option types */
 /** @{ */
@@ -168,6 +219,9 @@
 #define UIP_ND6_OPT_MTU                 5
 #define UIP_ND6_OPT_RDNSS               25
 #define UIP_ND6_OPT_DNSSL               31
+#define UIP_ND6_OPT_ARO			32
+#define UIP_ND6_OPT_6CO			33
+#define UIP_ND6_OPT_ABRO		34
 /** @} */
 
 /** \name ND6 option types */
@@ -175,6 +229,7 @@
 #define UIP_ND6_OPT_TYPE_OFFSET         0
 #define UIP_ND6_OPT_LEN_OFFSET          1
 #define UIP_ND6_OPT_DATA_OFFSET         2
+/** @} */
 
 /** \name ND6 message length (excluding options) */
 /** @{ */
@@ -192,7 +247,9 @@
 #define UIP_ND6_OPT_MTU_LEN            8
 #define UIP_ND6_OPT_RDNSS_LEN          1
 #define UIP_ND6_OPT_DNSSL_LEN          1
-
+#define UIP_ND6_OPT_ARO_LEN	       2
+#define UIP_ND6_OPT_6CO_LEN	       3
+#define UIP_ND6_OPT_ABRO_LEN	       3
 
 /* Length of TLLAO and SLLAO options, it is L2 dependant */
 #if UIP_CONF_LL_802154
@@ -213,7 +270,6 @@
 #endif /*UIP_CONF_LL_802154*/
 /** @} */
 
-
 /** \name Neighbor Advertisement flags masks */
 /** @{ */
 #define UIP_ND6_NA_FLAG_ROUTER          0x80
@@ -225,13 +281,13 @@
 
 /**
  * \name ND message structures
- * @{
+ ** @{
  */
 
 /**
  * \brief A neighbor solicitation constant part
  *
- * Possible option is: SLLAO
+ * Possible option is: SLLAO,ARO
  */
 typedef struct uip_nd6_ns {
   uint32_t reserved;
@@ -241,7 +297,7 @@ typedef struct uip_nd6_ns {
 /**
  * \brief A neighbor advertisement constant part.
  *
- * Possible option is: TLLAO
+ * Possible option is: TLLAO,ARO
  */
 typedef struct uip_nd6_na {
   uint8_t flagsreserved;
@@ -261,7 +317,7 @@ typedef struct uip_nd6_rs {
 /**
  * \brief A router advertisement constant part
  *
- * Possible options are: SLLAO, MTU, Prefix Information
+ * Possible options are: SLLAO, MTU, Prefix Information, 6CO, ABRO
  */
 typedef struct uip_nd6_ra {
   uint8_t cur_ttl;
@@ -323,12 +379,47 @@ typedef struct uip_nd6_opt_dns {
   uip_ipaddr_t ip;
 } uip_nd6_opt_dns;
 
+/** \brief ND option ARO */
+typedef struct uip_nd6_opt_aro {
+  uint8_t type;
+  uint8_t len;
+  uint8_t status;
+  uint8_t reserved1;
+  uint16_t reserved2;
+  uint16_t registration_lifetime;
+  uip_lladdr_t eui64;
+} uip_nd6_opt_aro;
+
+/** \brief ND option 6CO */
+typedef struct uip_nd6_opt_6co {
+  uint8_t type;
+  uint8_t len;
+  uint8_t context_len;
+  uint8_t res[3];
+  uint8_t c;
+  uint8_t cid[4];
+  uint16_t reserved;
+  uint16_t valid_lifetime;
+  uip_ipaddr_t prefix;
+} uip_nd6_opt_6co;
+
+/** \brief ND option ABRO */
+typedef struct uip_nd6_opt_abro {
+  uint8_t type;
+  uint8_t len;
+  uint16_t v_low;
+  uint16_t v_high;
+  uint16_t valid_lifetime;
+  uip_ipaddr_t ip;
+} uip_nd6_opt_abro;
+
 /** \struct Redirected header option */
 typedef struct uip_nd6_opt_redirected_hdr {
   uint8_t type;
   uint8_t len;
   uint8_t reserved[6];
 } uip_nd6_opt_redirected_hdr;
+
 /** @} */
 
 /**
@@ -380,7 +471,7 @@ uip_nd6_ns_input(void);
  *   a SLLAO option, otherwise no.
  */
 void
-uip_nd6_ns_output(uip_ipaddr_t *src, uip_ipaddr_t *dest, uip_ipaddr_t *tgt);
+uip_nd6_ns_output(uip_ipaddr_t *src, uip_ipaddr_t *dest, uip_ipaddr_t *tgt,uint8_t aro, uint16_t lifetime);
 
 #if UIP_CONF_ROUTER
 #if UIP_ND6_SEND_RA
@@ -404,7 +495,7 @@ void uip_nd6_ra_output(uip_ipaddr_t *dest);
  * possible option is SLLAO, MUST NOT be included if source = unspecified
  * SHOULD be included otherwise
  */
-void uip_nd6_rs_output(void);
+void uip_nd6_rs_output(uip_ipaddr_t *rtr_ipaddr);
 
 /**
  * \brief Initialise the uIP ND core
@@ -573,6 +664,5 @@ uip_appserver_addr_get(uip_ipaddr_t *ipaddr);
  *    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
  *
  */
-#endif /* UIP_ND6_H_ */
-
+#endif /*UIP_6LOWPAN_ND6_H_ */
 /** @} */
